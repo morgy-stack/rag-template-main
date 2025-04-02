@@ -1,0 +1,271 @@
+name: lint-and-test
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '24'
+  PYTHON_VERSION: '3.13'
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.filter_pr.outputs.services || steps.filter_merge.outputs.services || steps.manual.outputs.services }}
+      libs: ${{ steps.filter_pr.outputs.libs || steps.filter_merge.outputs.libs || steps.manual.outputs.libs }}
+      frontend: ${{ steps.filter_pr.outputs.frontend || steps.filter_merge.outputs.frontend || steps.manual.outputs.frontend }}
+      infrastructure: ${{ steps.filter_pr.outputs.infrastructure || steps.filter_merge.outputs.infrastructure || steps.manual.outputs.infrastructure }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # When running via merge queue, diff the merge-group head vs its base
+      - name: Detect changes (pull request)
+        id: filter_pr
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            services:
+              - 'services/admin-backend/**'
+              - 'services/document-extractor/**'
+              - 'services/rag-backend/**'
+              - 'services/mcp-server/**'
+            libs:
+              - 'libs/**'
+            frontend:
+              - 'services/frontend/**'
+            infrastructure:
+              - 'infrastructure/**'
+              - 'Tiltfile'
+
+      - name: Detect changes (merge queue)
+        id: filter_merge
+        if: github.event_name == 'merge_group'
+        uses: dorny/paths-filter@v3
+        with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
+          filters: |
+            services:
+              - 'services/admin-backend/**'
+              - 'services/document-extractor/**'
+              - 'services/rag-backend/**'
+              - 'services/mcp-server/**'
+            libs:
+              - 'libs/**'
+            frontend:
+              - 'services/frontend/**'
+            infrastructure:
+              - 'infrastructure/**'
+              - 'Tiltfile'
+
+      # When run manually, just run everything
+      - name: Mark all as changed (manual run)
+        id: manual
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          echo "services=true" >> "$GITHUB_OUTPUT"
+          echo "libs=true" >> "$GITHUB_OUTPUT"
+          echo "frontend=true" >> "$GITHUB_OUTPUT"
+          echo "infrastructure=true" >> "$GITHUB_OUTPUT"
+
+  sanitize-branch-name:
+    runs-on: ubuntu-latest
+    outputs:
+      sanitized_ref: ${{ steps.sanitize.outputs.sanitized_ref }}
+    steps:
+      - name: sanitize-branch-name
+        id: sanitize
+        run: |
+          SANITIZED_REF=$(echo "${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')
+          SANITIZED_REF=${SANITIZED_REF#-}
+          SANITIZED_REF=${SANITIZED_REF%-}
+          SANITIZED_REF=${SANITIZED_REF:0:63}
+          if [[ -z "$SANITIZED_REF" || "$SANITIZED_REF" =~ ^-+$ ]]; then
+            SANITIZED_REF="tmp-branch"
+          fi
+          echo "sanitized_ref=${SANITIZED_REF}" >> $GITHUB_OUTPUT
+        shell: bash
+
+  build-and-test-services:
+    name: Build and Test Services
+    runs-on: ubuntu-latest
+    needs: [changes, sanitize-branch-name]
+    if: needs.changes.outputs.services == 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ["admin-backend", "document-extractor", "rag-backend", "mcp-server"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set Docker Image Name
+        run: |
+          echo "IMAGE_NAME=${{ matrix.service }}:${{ needs.sanitize-branch-name.outputs.sanitized_ref }}-${{ github.run_number }}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Build Docker image
+        run: |
+          docker build -t $IMAGE_NAME -f services/${{ matrix.service }}/Dockerfile.dev .
+
+      - name: Run linting
+        run: |
+          docker run --rm $IMAGE_NAME make lint
+
+      - name: Run tests
+        run: |
+          docker run --rm $IMAGE_NAME make test
+
+  build-and-test-libs:
+    name: Build and Test Libraries
+    runs-on: ubuntu-latest
+    needs: [changes, sanitize-branch-name]
+    if: needs.changes.outputs.libs == 'true' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        library: ["rag-core-lib", "rag-core-api", "admin-api-lib", "extractor-api-lib"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set Docker Image Name
+        run: |
+          echo "LINT_IMAGE_NAME=${{ matrix.library }}-lint:${{ needs.sanitize-branch-name.outputs.sanitized_ref }}-${{ github.run_number }}" >> $GITHUB_ENV
+          echo "TEST_IMAGE_NAME=${{ matrix.library }}-test:${{ needs.sanitize-branch-name.outputs.sanitized_ref }}-${{ github.run_number }}" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Build lint image
+        run: |
+          docker build -t $LINT_IMAGE_NAME --build-arg DIRECTORY=${{ matrix.library }} --build-arg TEST=0 -f libs/Dockerfile libs
+
+      - name: Run linting
+        run: |
+          docker run --rm $LINT_IMAGE_NAME make lint
+
+      - name: Build test image
+        run: |
+          docker build -t $TEST_IMAGE_NAME --build-arg DIRECTORY=${{ matrix.library }} --build-arg TEST=1 -f libs/Dockerfile libs
+
+      - name: Run tests
+        run: |
+          docker run --rm $TEST_IMAGE_NAME make test
+
+  build-and-test-frontend:
+    name: Build and Test Frontend
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: services/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/frontend
+        run: npm ci
+
+      - name: Run linting
+        working-directory: services/frontend
+        run: npm run eslint
+
+      - name: Run tests
+        working-directory: services/frontend
+        run: npm run test
+
+      - name: Build chat app
+        working-directory: services/frontend
+        run: npm run chat:build
+
+      - name: Build admin app
+        working-directory: services/frontend
+        run: npm run admin:build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-build-artifacts
+          path: |
+            services/frontend/apps/*/dist/
+          retention-days: 7
+
+  validate-infrastructure:
+    name: Validate Infrastructure
+    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.infrastructure == 'true' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.0"
+
+      - name: Terraform Format Check
+        working-directory: infrastructure/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Init
+        working-directory: infrastructure/terraform
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        working-directory: infrastructure/terraform
+        run: terraform validate
+
+      - name: Validate Helm Charts
+        run: |
+          curl https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          helm repo add langfuse https://langfuse.github.io/langfuse-k8s
+          helm repo add qdrant https://qdrant.github.io/qdrant-helm
+          helm repo add bitnami https://charts.bitnami.com/bitnami
+          helm repo add enapter https://enapter.github.io/charts/
+          helm repo add ollama https://otwld.github.io/ollama-helm/
+          helm repo add jetstack https://charts.jetstack.io
+          helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+          find infrastructure -name Chart.yaml -print0 | while IFS= read -r -d '' chart; do
+            chart_dir="$(dirname "$chart")"
+            helm dependency build "$chart_dir"
+            helm lint "$chart_dir"
+          done
+
+  summary:
+    name: Lint and Test CI Summary
+    runs-on: ubuntu-latest
+    needs: [build-and-test-services, build-and-test-libs, build-and-test-frontend, validate-infrastructure]
+    if: always()
+    steps:
+      - name: Check results
+        run: |
+          echo "Services: ${{ needs.build-and-test-services.result }}"
+          echo "Libraries: ${{ needs.build-and-test-libs.result }}"
+          echo "Frontend: ${{ needs.build-and-test-frontend.result }}"
+          echo "Infrastructure: ${{ needs.validate-infrastructure.result }}"
+
+          if [[ "${{ needs.build-and-test-services.result }}" == "failure" ]] || \
+             [[ "${{ needs.build-and-test-libs.result }}" == "failure" ]] || \
+             [[ "${{ needs.build-and-test-frontend.result }}" == "failure" ]] || \
+             [[ "${{ needs.validate-infrastructure.result }}" == "failure" ]]; then
+            echo "❌ One or more jobs failed"
+            exit 1
+          else
+            echo "✅ All jobs passed or were skipped"
+          fi

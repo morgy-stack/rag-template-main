@@ -1,0 +1,20 @@
+*/.gitignore
+
+# Node/Nx artifacts (keep build contexts small)
+**/node_modules
+**/.nx
+
+# Frontend build outputs and logs
+services/frontend/dist
+services/frontend/tmp
+services/frontend/coverage
+services/frontend/apps/*/dist
+services/frontend/*.log
+
+# Python envs and compiled python files
+*/venv
+*/.venv
+*/.env
+*/*.pyc
+
+**/.notebooks
