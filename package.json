@@ -1,0 +1,16 @@
+{
+    "devDependencies": {
+        "@semantic-release/git": "^10.0.1",
+        "@semantic-release/github": "^11.0.1",
+        "conventional-changelog-conventionalcommits": "^9.0.0",
+        "semantic-release": "^25.0.2"
+    },
+    "overrides": {
+        "handlebars": "^4.7.9",
+        "lodash": "^4.18.1",
+        "lodash-es": "^4.18.1",
+        "npm": "^11.16.0",
+        "picomatch": "^4.0.4",
+        "undici": "^6.25.0"
+    }
+}
