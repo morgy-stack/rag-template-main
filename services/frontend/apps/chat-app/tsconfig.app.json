@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "outDir": "../../dist/out-tsc",
+    "types": [
+      "node",
+      "vite/client",
+    ],
+    "jsxImportSource": "vue"
+  },
+  "files": [],
+  "exclude": [],
+  "include": [
+    "src/**/*.ts",
+    "**/*.vue",
+    "env.d.ts",
+  ]
+}
